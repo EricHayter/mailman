@@ -5,13 +5,19 @@ pub use fixed::FixedDiscoverer;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
-// TODO: figure out the best way to hint that a node might be down from failed
-// client requests, so we don't rely exclusively on healthchecks. A single
-// failed request should only mark the node as suspect, not remove it, so this
-// probably needs a separate event from `Removed`. Failing healthchecks for ~6s
-// can keep meaning the node is gone.
+/// Changes to which nodes exist and whether they can take requests.
+/// Discoverers send these, and request handlers send `Unresponsive` when a
+/// request to a node fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryEvent {
+    /// The node exists and can take requests.
     Added(SocketAddr),
+    /// A known node can take requests again.
+    Responsive(SocketAddr),
+    /// Stop routing to the node, but keep it (and any state about it), since
+    /// it may come back.
+    Unresponsive(SocketAddr),
+    /// The node is gone.
     Removed(SocketAddr),
 }
 
