@@ -7,7 +7,7 @@ use std::{
 use axum::Router;
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use discovery::{Discoverer, FixedDiscoverer};
+use discovery::{Discoverer, FixedDiscoverer, HealthCheckConfig};
 use routes::{AppState, chat_completion};
 use selector::{NodeSelector, round_robin::RoundRobinSelector};
 
@@ -32,7 +32,11 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let selector: Arc<dyn NodeSelector> = Arc::new(RoundRobinSelector::default());
 
-    let discoverer = FixedDiscoverer::new(BACKENDS.to_vec(), client.clone());
+    let discoverer = FixedDiscoverer::new(
+        BACKENDS.to_vec(),
+        client.clone(),
+        HealthCheckConfig::default(),
+    );
     let discovery = spawn_discovery(discoverer, selector.clone());
 
     let app = Router::new()

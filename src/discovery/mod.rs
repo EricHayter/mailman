@@ -1,6 +1,7 @@
 pub mod fixed;
 mod healthcheck;
 pub use fixed::FixedDiscoverer;
+pub use healthcheck::HealthCheckConfig;
 
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
