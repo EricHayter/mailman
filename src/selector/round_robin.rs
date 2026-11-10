@@ -7,6 +7,8 @@ use std::{
     },
 };
 
+use tracing::{info, warn};
+
 use crate::{discovery::DiscoveryEvent, models::CreateChatCompletionRequest};
 
 use super::NodeSelector;
@@ -19,13 +21,39 @@ pub struct RoundRobinSelector {
 }
 
 impl NodeSelector for RoundRobinSelector {
-    /// Adds nodes the first time it hears about them.
+    /// Adds nodes the first time it hears about them. Logs only real changes,
+    /// since discoverers send an event after every health check.
     fn handle_discovery_event(&self, event: DiscoveryEvent) {
         let (addr, responsive) = match event {
             DiscoveryEvent::Responsive(addr) => (addr, true),
             DiscoveryEvent::Unresponsive(addr) => (addr, false),
         };
-        self.nodes.write().unwrap().insert(addr, responsive);
+
+        let mut nodes = self.nodes.write().unwrap();
+        let previous = nodes.insert(addr, responsive);
+        if previous == Some(responsive) {
+            return;
+        }
+        let total = nodes.len();
+        let responsive_count = nodes.values().filter(|&&responsive| responsive).count();
+        // Writing logs is I/O, so don't make `select` wait on it.
+        drop(nodes);
+
+        match (previous, responsive) {
+            (None, true) => info!(%addr, responsive = responsive_count, total, "node added"),
+            (None, false) => {
+                info!(%addr, responsive = responsive_count, total, "node added, not responsive yet")
+            }
+            (Some(_), true) => {
+                info!(%addr, responsive = responsive_count, total, "node responsive again")
+            }
+            (Some(_), false) => {
+                warn!(%addr, responsive = responsive_count, total, "node marked unresponsive")
+            }
+        }
+        if responsive_count == 0 {
+            warn!(total, "no responsive nodes, requests will fail");
+        }
     }
 
     /// The map's order is arbitrary but only changes when a node is added, so

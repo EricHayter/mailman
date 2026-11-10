@@ -2,7 +2,10 @@ use reqwest::Client;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
+use tracing::{debug, info, warn};
+
 use super::DiscoveryEvent;
+use crate::telemetry::error_chain;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HealthCheckConfig {
@@ -33,14 +36,30 @@ pub async fn monitor_node(
 ) {
     let mut interval = tokio::time::interval(config.interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    info!(%addr, interval = ?config.interval, timeout = ?config.timeout, "monitoring node");
+
+    // Only this task knows why a check failed, so it warns with the reason
+    // when checks start failing, and logs the rest of a run of failures at
+    // debug. The selector logs the node's state changes.
+    let mut failing = false;
 
     loop {
         interval.tick().await;
 
-        let event = if is_healthy(&client, addr, config.timeout).await {
-            DiscoveryEvent::Responsive(addr)
-        } else {
-            DiscoveryEvent::Unresponsive(addr)
+        let event = match check_health(&client, addr, config.timeout).await {
+            Ok(()) => {
+                failing = false;
+                DiscoveryEvent::Responsive(addr)
+            }
+            Err(error) => {
+                if failing {
+                    debug!(%addr, %error, "health check failed");
+                } else {
+                    warn!(%addr, %error, "health check failed");
+                }
+                failing = true;
+                DiscoveryEvent::Unresponsive(addr)
+            }
         };
 
         if tx.send(event).await.is_err() {
@@ -49,11 +68,17 @@ pub async fn monitor_node(
     }
 }
 
-async fn is_healthy(client: &Client, addr: SocketAddr, timeout: Duration) -> bool {
-    client
+/// Returns why the check failed, for logging.
+async fn check_health(client: &Client, addr: SocketAddr, timeout: Duration) -> Result<(), String> {
+    let response = client
         .get(format!("http://{addr}/health"))
         .timeout(timeout)
         .send()
         .await
-        .is_ok_and(|response| response.status().is_success())
+        .map_err(|err| error_chain(&err))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("status {}", response.status()))
+    }
 }

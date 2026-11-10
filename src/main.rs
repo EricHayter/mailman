@@ -6,6 +6,7 @@ use std::{
 
 use axum::Router;
 use tokio::{sync::mpsc, task::JoinHandle};
+use tracing::info;
 
 use discovery::{Discoverer, FixedDiscoverer, HealthCheckConfig};
 use routes::{AppState, chat_completion};
@@ -15,6 +16,7 @@ mod discovery;
 mod models;
 mod routes;
 mod selector;
+mod telemetry;
 
 const ADDRESS: &str = "0.0.0.0:3000";
 const BACKENDS: [SocketAddr; 1] = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)];
@@ -26,6 +28,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    telemetry::init();
+
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
@@ -39,10 +43,10 @@ async fn main() -> anyhow::Result<()> {
     );
     let discovery = spawn_discovery(discoverer, selector.clone());
 
-    let app = Router::new()
-        .merge(chat_completion::routes())
+    let app = telemetry::http_layers(Router::new().merge(chat_completion::routes()))
         .with_state(AppState { client, selector });
     let listener = tokio::net::TcpListener::bind(ADDRESS).await?;
+    info!(address = ADDRESS, backends = ?BACKENDS, "listening");
 
     tokio::select! {
         result = axum::serve(listener, app).into_future() => result?,

@@ -12,10 +12,12 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::TryStreamExt;
+use tracing::{Instrument, debug, error, info_span, warn};
 
 use super::AppState;
 use crate::{
     discovery::DiscoveryEvent, models::CreateChatCompletionRequest, selector::NodeSelector,
+    telemetry::error_chain,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -46,9 +48,12 @@ async fn create_chat_completion(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
-    let req: CreateChatCompletionRequest =
-        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let req: CreateChatCompletionRequest = serde_json::from_slice(&body).map_err(|err| {
+        debug!(error = %err, "couldn't parse request body");
+        StatusCode::BAD_REQUEST
+    })?;
     if !req.is_valid() {
+        debug!("invalid request");
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -60,7 +65,11 @@ async fn create_chat_completion(
     while let Some(addr) = state.selector.select(&req, &tried) {
         tried.push(addr);
 
-        match send_to_node(&state.client, addr, body.clone(), authorization).await {
+        let attempt = info_span!("attempt", %addr, number = tried.len());
+        match send_to_node(&state.client, addr, body.clone(), authorization)
+            .instrument(attempt)
+            .await
+        {
             Attempt::Done(response) => return Ok(proxy_response(response, addr, &state.selector)),
             Attempt::NodeFailed(response) => {
                 mark_unresponsive(&state.selector, addr);
@@ -73,9 +82,19 @@ async fn create_chat_completion(
     }
 
     match fallback {
-        Some((addr, response)) => Ok(proxy_response(response, addr, &state.selector)),
-        None if tried.is_empty() => Err(StatusCode::SERVICE_UNAVAILABLE),
-        None => Err(StatusCode::BAD_GATEWAY),
+        Some((addr, response)) => {
+            error!(?tried, "every node failed, returning the last server error");
+            Ok(proxy_response(response, addr, &state.selector))
+        }
+        None if tried.is_empty() => {
+            // The selector warns once when the last node goes down.
+            debug!("no responsive nodes for request");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        None => {
+            error!(?tried, "every node failed");
+            Err(StatusCode::BAD_GATEWAY)
+        }
     }
 }
 
@@ -106,12 +125,21 @@ async fn send_to_node(
     }
 
     match upstream.send().await {
-        Ok(response) if response.status().is_server_error() => Attempt::NodeFailed(Some(response)),
+        Ok(response) if response.status().is_server_error() => {
+            warn!(status = %response.status(), "node returned a server error, trying another");
+            Attempt::NodeFailed(Some(response))
+        }
         Ok(response) => Attempt::Done(response),
-        Err(err) if err.is_builder() => Attempt::Failed,
+        Err(err) if err.is_builder() => {
+            error!(error = %error_chain(&err), "couldn't build request to node");
+            Attempt::Failed
+        }
         // Connection errors, timeouts, and the node dropping the connection
         // before responding.
-        Err(_) => Attempt::NodeFailed(None),
+        Err(err) => {
+            warn!(error = %error_chain(&err), "request to node failed, trying another");
+            Attempt::NodeFailed(None)
+        }
     }
 }
 
@@ -130,9 +158,10 @@ fn proxy_response(
     }
 
     let selector = selector.clone();
-    let body = response
-        .bytes_stream()
-        .inspect_err(move |_| mark_unresponsive(&selector, addr));
+    let body = response.bytes_stream().inspect_err(move |err| {
+        warn!(%addr, error = %error_chain(err), "response stream from node failed partway");
+        mark_unresponsive(&selector, addr);
+    });
 
     (status, headers, Body::from_stream(body)).into_response()
 }
