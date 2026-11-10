@@ -6,20 +6,16 @@ pub use healthcheck::HealthCheckConfig;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
-/// Changes to which nodes exist and whether they can take requests.
-/// Discoverers send these, and request handlers send `Unresponsive` when a
-/// request to a node fails.
+/// Whether a node can take requests. Discoverers send these after each health
+/// check, and request handlers send `Unresponsive` when a request to a node
+/// fails. The selector adds a node the first time it hears about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryEvent {
-    /// The node exists and can take requests.
-    Added(SocketAddr),
-    /// A known node can take requests again.
+    /// Route requests to the node.
     Responsive(SocketAddr),
     /// Stop routing to the node, but keep it (and any state about it), since
     /// it may come back.
     Unresponsive(SocketAddr),
-    /// The node is gone.
-    Removed(SocketAddr),
 }
 
 /// Trait for discovering instances

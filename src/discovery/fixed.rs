@@ -9,16 +9,20 @@ use super::{
 
 pub struct FixedDiscoverer {
     addrs: Vec<SocketAddr>,
-    client: Client,
-    health_check: HealthCheckConfig,
+    http_client: Client,
+    health_check_cfg: HealthCheckConfig,
 }
 
 impl FixedDiscoverer {
-    pub fn new(addrs: Vec<SocketAddr>, client: Client, health_check: HealthCheckConfig) -> Self {
+    pub fn new(
+        addrs: Vec<SocketAddr>,
+        http_client: Client,
+        health_check_cfg: HealthCheckConfig,
+    ) -> Self {
         Self {
             addrs,
-            client,
-            health_check,
+            http_client,
+            health_check_cfg,
         }
     }
 }
@@ -32,9 +36,9 @@ impl Discoverer for FixedDiscoverer {
         let mut monitors = JoinSet::new();
         for &addr in &self.addrs {
             monitors.spawn(monitor_node(
-                self.client.clone(),
+                self.http_client.clone(),
                 addr,
-                self.health_check,
+                self.health_check_cfg,
                 tx.clone(),
             ));
         }

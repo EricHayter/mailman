@@ -19,30 +19,17 @@ pub struct RoundRobinSelector {
 }
 
 impl NodeSelector for RoundRobinSelector {
+    /// Adds nodes the first time it hears about them.
     fn handle_discovery_event(&self, event: DiscoveryEvent) {
-        let mut nodes = self.nodes.write().unwrap();
-        match event {
-            DiscoveryEvent::Added(addr) => {
-                nodes.insert(addr, true);
-            }
-            DiscoveryEvent::Responsive(addr) => {
-                if let Some(responsive) = nodes.get_mut(&addr) {
-                    *responsive = true;
-                }
-            }
-            DiscoveryEvent::Unresponsive(addr) => {
-                if let Some(responsive) = nodes.get_mut(&addr) {
-                    *responsive = false;
-                }
-            }
-            DiscoveryEvent::Removed(addr) => {
-                nodes.remove(&addr);
-            }
-        }
+        let (addr, responsive) = match event {
+            DiscoveryEvent::Responsive(addr) => (addr, true),
+            DiscoveryEvent::Unresponsive(addr) => (addr, false),
+        };
+        self.nodes.write().unwrap().insert(addr, responsive);
     }
 
-    /// The map's order is arbitrary but only changes when nodes are added or
-    /// removed, so picks rotate evenly between those changes.
+    /// The map's order is arbitrary but only changes when a node is added, so
+    /// picks rotate evenly between additions.
     fn select(
         &self,
         _req: &CreateChatCompletionRequest,
@@ -102,13 +89,17 @@ mod tests {
 
     #[test]
     fn rotates_through_responsive_nodes() {
-        let selector = selector_with(&[Added(addr(1)), Added(addr(2))]);
+        let selector = selector_with(&[Responsive(addr(1)), Responsive(addr(2))]);
         assert_alternates(&picks(&selector, 4), addr(1), addr(2));
     }
 
     #[test]
     fn skips_unresponsive_nodes_until_responsive_again() {
-        let selector = selector_with(&[Added(addr(1)), Added(addr(2)), Unresponsive(addr(1))]);
+        let selector = selector_with(&[
+            Responsive(addr(1)),
+            Responsive(addr(2)),
+            Unresponsive(addr(1)),
+        ]);
         assert_eq!(picks(&selector, 2), [Some(addr(2)), Some(addr(2))]);
 
         selector.handle_discovery_event(Responsive(addr(1)));
@@ -116,20 +107,17 @@ mod tests {
     }
 
     #[test]
-    fn ignores_events_for_unknown_nodes() {
-        let selector = selector_with(&[Responsive(addr(1)), Unresponsive(addr(2))]);
-        assert_eq!(selector.select(&request(), &[]), None);
-    }
+    fn adds_unknown_nodes() {
+        let selector = selector_with(&[Unresponsive(addr(1)), Responsive(addr(2))]);
+        assert_eq!(picks(&selector, 2), [Some(addr(2)), Some(addr(2))]);
 
-    #[test]
-    fn removed_nodes_stay_removed() {
-        let selector = selector_with(&[Added(addr(1)), Removed(addr(1)), Responsive(addr(1))]);
-        assert_eq!(selector.select(&request(), &[]), None);
+        selector.handle_discovery_event(Responsive(addr(1)));
+        assert_alternates(&picks(&selector, 4), addr(1), addr(2));
     }
 
     #[test]
     fn honours_exclude() {
-        let selector = selector_with(&[Added(addr(1)), Added(addr(2))]);
+        let selector = selector_with(&[Responsive(addr(1)), Responsive(addr(2))]);
 
         for _ in 0..3 {
             assert_eq!(selector.select(&request(), &[addr(1)]), Some(addr(2)));
