@@ -1,0 +1,39 @@
+# Full deployment: a real model with torch.compile, for benchmarking. The first
+# start downloads the weights and compiles, which takes several minutes.
+#
+# From the repo root:
+#   Start:  docker compose -f deploy/full.yaml up -d
+#   Logs:   docker compose -f deploy/full.yaml logs -f
+#   Stop:   docker compose -f deploy/full.yaml stop    (keeps the compile cache)
+#   Remove: docker compose -f deploy/full.yaml down
+# Or set COMPOSE_FILE=deploy/full.yaml in .env and drop the -f.
+
+name: mailman
+
+services:
+  vllm:
+    image: vllm/vllm-openai-cpu:v0.33.0
+    ports:
+      - "8000:8000"
+    command:
+      - --model
+      - Qwen/Qwen3-1.7B
+      - --max-model-len
+      - "8192"
+    environment:
+      VLLM_CPU_KVCACHE_SPACE: "8"   # GB of KV cache
+    # Cores 10-11 are left free for mailman and the load generator.
+    cpuset: "0-9"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ipc: host
+    cap_add:
+      - SYS_PTRACE            # lets you attach py-spy / gdb
+    security_opt:
+      - seccomp=unconfined
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 600s

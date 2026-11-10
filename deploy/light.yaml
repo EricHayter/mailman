@@ -1,0 +1,42 @@
+# Light deployment: the smallest instruct model, started in eager mode so it's
+# up in seconds. For testing mailman's routing and health checks; replies are
+# poor quality.
+#
+# From the repo root:
+#   Start:  docker compose -f deploy/light.yaml up -d
+#   Logs:   docker compose -f deploy/light.yaml logs -f
+#   Stop:   docker compose -f deploy/light.yaml stop
+#   Remove: docker compose -f deploy/light.yaml down
+# Or set COMPOSE_FILE=deploy/light.yaml in .env and drop the -f.
+
+name: mailman
+
+services:
+  vllm:
+    image: vllm/vllm-openai-cpu:v0.33.0
+    ports:
+      - "8000:8000"
+    command:
+      - --model
+      - HuggingFaceTB/SmolLM2-135M-Instruct
+      - --max-model-len
+      - "2048"
+      # Skip torch.compile: much faster startup, slower generation (which
+      # doesn't matter at this size).
+      - --enforce-eager
+    environment:
+      VLLM_CPU_KVCACHE_SPACE: "1"   # GB of KV cache
+    cpuset: "0-1"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ipc: host
+    cap_add:
+      - SYS_PTRACE            # lets you attach py-spy / gdb
+    security_opt:
+      - seccomp=unconfined
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s

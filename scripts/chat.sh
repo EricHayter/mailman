@@ -10,7 +10,8 @@
 # Settings are read from .env in the repo root (see .env.example). Variables
 # already set in your shell take precedence over .env.
 #   CHAT_ADDR        host:port, e.g. 127.0.0.1:3000 for mailman
-#   CHAT_MODEL       model name, e.g. Qwen/Qwen3-0.6B
+#   CHAT_MODEL       model name (default: the model of the COMPOSE_FILE
+#                    deployment)
 #   CHAT_MAX_TOKENS  max tokens to generate (default 64; CPU vLLM is slow)
 #   CHAT_PATH        request path (default /chat/completions; use
 #                    /v1/chat/completions to send straight to a vLLM node)
@@ -49,8 +50,15 @@ shift $((OPTIND - 1))
 [[ $# -eq 1 ]] || usage
 message=$1
 
+# Default to the model the deployment runs, so the two can't drift apart.
+if [[ -z "$model" ]]; then
+    model=$(cd "$(dirname "$0")/.." &&
+        docker compose config --format json 2>/dev/null |
+        jq -r '.services.vllm.command | index("--model") as $i | .[$i + 1] // empty') || true
+fi
+
 if [[ -z "$addr" || -z "$model" ]]; then
-    echo "error: no address or model; pass -a and -m, or run: cp .env.example .env" >&2
+    echo "error: no address or model; pass -a and -m, or set COMPOSE_FILE in .env (cp .env.example .env)" >&2
     exit 1
 fi
 
