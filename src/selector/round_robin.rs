@@ -24,35 +24,36 @@ impl NodeSelector for RoundRobinSelector {
     /// Adds nodes the first time it hears about them. Logs only real changes,
     /// since discoverers send an event after every health check.
     fn handle_discovery_event(&self, event: DiscoveryEvent) {
-        let (addr, responsive) = match event {
+        let (addr, is_responsive) = match event {
             DiscoveryEvent::Responsive(addr) => (addr, true),
             DiscoveryEvent::Unresponsive(addr) => (addr, false),
         };
 
         let mut nodes = self.nodes.write().unwrap();
-        let previous = nodes.insert(addr, responsive);
-        if previous == Some(responsive) {
+        let prev_state = nodes.insert(addr, is_responsive);
+        if prev_state == Some(is_responsive) {
             return;
         }
-        let total = nodes.len();
+        let num_nodes = nodes.len();
         let responsive_count = nodes.values().filter(|&&responsive| responsive).count();
         // Writing logs is I/O, so don't make `select` wait on it.
         drop(nodes);
 
-        match (previous, responsive) {
-            (None, true) => info!(%addr, responsive = responsive_count, total, "node added"),
+        // do some logging
+        match (prev_state, is_responsive) {
+            (None, true) => info!(%addr, responsive = responsive_count, num_nodes, "node added"),
             (None, false) => {
-                info!(%addr, responsive = responsive_count, total, "node added, not responsive yet")
+                info!(%addr, responsive = responsive_count, num_nodes, "node added, not responsive yet")
             }
             (Some(_), true) => {
-                info!(%addr, responsive = responsive_count, total, "node responsive again")
+                info!(%addr, responsive = responsive_count, num_nodes, "node responsive again")
             }
             (Some(_), false) => {
-                warn!(%addr, responsive = responsive_count, total, "node marked unresponsive")
+                warn!(%addr, responsive = responsive_count, num_nodes, "node marked unresponsive")
             }
         }
         if responsive_count == 0 {
-            warn!(total, "no responsive nodes, requests will fail");
+            warn!(num_nodes, "no responsive nodes, requests will fail");
         }
     }
 
@@ -66,7 +67,7 @@ impl NodeSelector for RoundRobinSelector {
         let nodes = self.nodes.read().unwrap();
         let mut candidates = nodes
             .iter()
-            .filter(|&(addr, &responsive)| responsive && !exclude.contains(addr))
+            .filter(|&(addr, &is_responsive)| is_responsive && !exclude.contains(addr))
             .map(|(&addr, _)| addr);
 
         let count = candidates.clone().count();
