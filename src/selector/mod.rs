@@ -1,3 +1,4 @@
+pub mod cache_aware;
 pub mod round_robin;
 
 use std::net::SocketAddr;

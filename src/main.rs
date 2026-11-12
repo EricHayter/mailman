@@ -10,7 +10,10 @@ use tracing::info;
 
 use discovery::{Discoverer, FixedDiscoverer, HealthCheckConfig};
 use routes::{AppState, chat_completion};
-use selector::{NodeSelector, round_robin::RoundRobinSelector};
+use selector::{
+    NodeSelector,
+    cache_aware::{CacheAwareConfig, CacheAwareSelector},
+};
 
 mod discovery;
 mod models;
@@ -34,7 +37,8 @@ async fn main() -> anyhow::Result<()> {
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()?;
-    let selector: Arc<dyn NodeSelector> = Arc::new(RoundRobinSelector::default());
+    let selector: Arc<dyn NodeSelector> =
+        Arc::new(CacheAwareSelector::new(CacheAwareConfig::default()));
 
     let discoverer = FixedDiscoverer::new(
         BACKENDS.to_vec(),

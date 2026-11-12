@@ -13,8 +13,8 @@ use tokio::sync::mpsc;
 pub enum DiscoveryEvent {
     /// Route requests to the node.
     Responsive(SocketAddr),
-    /// Stop routing to the node, but keep it (and any state about it), since
-    /// it may come back.
+    /// Stop routing to the node. Selectors keep it (and any state about it),
+    /// since it may come back, but may drop it if it stays unresponsive.
     Unresponsive(SocketAddr),
 }
 

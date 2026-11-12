@@ -462,6 +462,7 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "patricia_tree",
  "reqwest",
  "serde",
  "serde_json",
@@ -547,6 +548,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "patricia_tree"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fd106b8571932f2b8d961a296390c56f05d454ce95e2405f1d8703ca0119e8e"
 
 [[package]]
 name = "percent-encoding"
