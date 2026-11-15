@@ -1,0 +1,88 @@
+# Tiny model on CPU, for testing routing and health checks.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  replicas: 2
+  # One pod per node leaves nowhere to surge a replacement onto.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # At most one vLLM pod per node.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: vllm
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.33.0
+          args:
+            - --model
+            - HuggingFaceTB/SmolLM2-135M-Instruct
+            - --max-model-len
+            - "2048"
+            - --enforce-eager
+          ports:
+            - name: http
+              containerPort: 8000
+          # Up to 20 min to boot (5s x 240); ready as soon as one check passes.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 240
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 5
+          # Lenient (~30s): a restart costs a full model reload.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          env:
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"                  # GB of KV cache
+          resources:
+            requests:
+              cpu: "2"
+              memory: 3Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]         # py-spy / gdb
+            seccompProfile:
+              type: Unconfined
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory     # tmpfs in RAM; counts toward the container's memory limit
+            sizeLimit: 1Gi
+        - name: hf-cache
+          hostPath:
+            path: /var/cache/huggingface
+            type: DirectoryOrCreate

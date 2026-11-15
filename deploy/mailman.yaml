@@ -1,0 +1,75 @@
+# mailman in front of the `vllm` Service, discovering pods via EndpointSlices.
+# kind: docker build -t mailman:dev . && kind load docker-image mailman:dev --name test
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mailman
+---
+# Read-only access to what the Kubernetes discoverer watches.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mailman-discovery
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mailman-discovery
+subjects:
+  - kind: ServiceAccount
+    name: mailman
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mailman-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailman
+  labels:
+    app: mailman
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailman
+  template:
+    metadata:
+      labels:
+        app: mailman
+    spec:
+      serviceAccountName: mailman
+      containers:
+        - name: mailman
+          image: mailman:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MAILMAN_K8S_SERVICE
+              value: vllm
+            - name: MAILMAN_K8S_POD_LABELS
+              value: app=vllm
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailman
+spec:
+  selector:
+    app: mailman
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

@@ -1,0 +1,18 @@
+# Used by scripts/kind-up.sh.
+# Each node mounts the host's Hugging Face cache so pods don't redownload models.
+# kind doesn't expand ${HOME} itself; the script runs this through envsubst.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: ${HOME}/.cache/huggingface
+        containerPath: /var/cache/huggingface
+  - role: worker
+    extraMounts:
+      - hostPath: ${HOME}/.cache/huggingface
+        containerPath: /var/cache/huggingface
+  - role: worker
+    extraMounts:
+      - hostPath: ${HOME}/.cache/huggingface
+        containerPath: /var/cache/huggingface
