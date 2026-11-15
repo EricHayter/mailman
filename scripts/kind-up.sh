@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # Creates or updates a local kind cluster running CPU vLLM behind mailman.
-# Safe to rerun: it rebuilds and reloads mailman, and leaves vLLM running.
+#
+# Creates the cluster (deploy/kind-config.yaml) if it doesn't exist and deploys
+# two CPU vLLM pods running a tiny model (deploy/vllm-cpu.yaml), which take
+# about 4 CPUs and 8 GiB of memory. It then builds mailman's image, loads it
+# into the cluster and deploys it (deploy/mailman.yaml). mailman finds the vLLM
+# pods through the vllm Service's EndpointSlices.
+#
+# The first run downloads the vLLM image and model, so it takes a few minutes.
+# Rerun after changing mailman's code to rebuild and redeploy; vLLM is left
+# running. Remove everything with `kind delete cluster --name mailman`.
+#
+# Useful while it runs:
+#   kubectl --context kind-mailman logs -f deploy/mailman
+#   kubectl --context kind-mailman get endpointslices -l kubernetes.io/service-name=vllm
 #
 # Usage: scripts/kind-up.sh
 #   KIND_CLUSTER  cluster name (default: mailman)

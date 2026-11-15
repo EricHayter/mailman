@@ -1,43 +1,25 @@
 # mailman
+
+<p align="center"><img src="docs/mailman.png" alt="mailman" width="220"></p>
+
 A router for vLLM
 
-## Local deployment (CPU, kind)
+## Quick start (local, CPU)
 
-Runs two CPU vLLM pods (a tiny model) and mailman in a local
-[kind](https://kind.sigs.k8s.io/) cluster. mailman finds the vLLM pods through
-the `vllm` Service's EndpointSlices.
-
-Needs Docker, [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation),
-kubectl, `envsubst` (gettext) and `jq`. vLLM takes about 4 CPUs and 8 GiB of
-memory; set `replicas: 1` in `deploy/vllm-cpu.yaml` on a smaller machine.
+Install [Docker](https://docs.docker.com/engine/install/),
+[kind](https://kind.sigs.k8s.io/docs/user/quick-start/),
+[kubectl](https://kubernetes.io/docs/tasks/tools/), `envsubst` and `jq`, then:
 
 ```
-scripts/kind-up.sh
-```
-
-This creates the cluster (named `mailman`, override with `KIND_CLUSTER`) if it
-doesn't exist, deploys vLLM, then builds mailman's image, loads it into the
-cluster and deploys it. The first run downloads the vLLM image and model, so it
-takes a few minutes. Rerun it after changing mailman's code to rebuild and
-redeploy.
-
-Send a request through mailman:
-
-```
-kubectl --context kind-mailman port-forward svc/mailman 3000:3000
+scripts/kind-up.sh                                                 # cluster + vLLM + mailman
+kubectl --context kind-mailman port-forward svc/mailman 3000:3000  # leave running
+cp .env.example .env
 scripts/chat.sh "hello"
 ```
 
-Useful while it runs:
+Tear down with `kind delete cluster --name mailman`.
 
-```
-kubectl --context kind-mailman logs -f deploy/mailman
-kubectl --context kind-mailman get endpointslices -l kubernetes.io/service-name=vllm
-```
-
-Remove everything with `kind delete cluster --name mailman`.
-
-### Configuration
+## Configuration
 
 mailman is configured through environment variables, set in
 `deploy/mailman.yaml`:
@@ -50,3 +32,35 @@ mailman is configured through environment variables, set in
 | `MAILMAN_K8S_PORT_NAME` | only needed if the Service has several ports |
 | `RUST_LOG` | log filter, e.g. `info` or `mailman=debug` |
 | `LOG_FORMAT` | `json` for JSON logs |
+
+## Troubleshooting
+
+**`permission denied while trying to connect to the Docker daemon socket`**
+
+Your user isn't in the `docker` group. Add it, and apply it to the current
+shell (other terminals need a new login):
+
+```
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+**Pods crash, and their logs show `too many open files`**
+
+The inotify limits are too low for a multi-node kind cluster
+([details](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)):
+
+```
+sudo sysctl fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512
+```
+
+**`kind-up.sh` hangs at `Waiting for deployment "vllm" rollout to finish`**
+
+Check why the pods aren't starting:
+
+```
+kubectl --context kind-mailman describe pods -l app=vllm | grep -A3 Events
+```
+
+If it shows `0/3 nodes are available: ... Insufficient cpu` (or `memory`), the
+machine can't fit two vLLM pods, which need about 4 CPUs and 8 GiB together.
+Set `replicas: 1` in `deploy/vllm-cpu.yaml` and rerun `scripts/kind-up.sh`.
