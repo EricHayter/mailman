@@ -5,7 +5,8 @@
 # two CPU vLLM pods running a tiny model (deploy/vllm-cpu.yaml), which take
 # about 4 CPUs and 8 GiB of memory. It then builds mailman's image, loads it
 # into the cluster and deploys it (deploy/mailman.yaml). mailman finds the vLLM
-# pods through the vllm Service's EndpointSlices.
+# pods through the vllm Service's EndpointSlices, and is reachable on
+# localhost:3000 for as long as the cluster exists.
 #
 # The first run downloads the vLLM image and model, so it takes a few minutes.
 # Rerun after changing mailman's code to rebuild and redeploy; vLLM is left
@@ -19,6 +20,21 @@
 #   KIND_CLUSTER  cluster name (default: mailman)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+declare -A install=(
+    [docker]="https://docs.docker.com/engine/install/"
+    [kind]="https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
+    [kubectl]="https://kubernetes.io/docs/tasks/tools/"
+    [envsubst]="https://www.gnu.org/software/gettext/ (package gettext-base on Debian/Ubuntu, gettext elsewhere)"
+)
+missing=false
+for cmd in docker kind kubectl envsubst; do
+    if ! command -v "$cmd" >/dev/null; then
+        echo "error: $cmd not found. Install it: ${install[$cmd]}" >&2
+        missing=true
+    fi
+done
+"$missing" && exit 1
 
 cluster=${KIND_CLUSTER:-mailman}
 # Pin every command to the kind cluster, whatever the current context is.
@@ -42,7 +58,9 @@ kubectl rollout status deploy/mailman
 
 cat <<MSG
 
-Ready. Forward mailman's port, then send a request:
-  kubectl --context kind-$cluster port-forward svc/mailman 3000:3000
+Ready. mailman is on localhost:3000:
   scripts/chat.sh "hello"
+
+Shut everything down with:
+  kind delete cluster --name $cluster
 MSG

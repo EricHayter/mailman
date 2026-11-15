@@ -67,9 +67,12 @@ kind: Service
 metadata:
   name: mailman
 spec:
+  # Exposed on every node at nodePort, which kind maps to localhost:3000.
+  type: NodePort
   selector:
     app: mailman
   ports:
     - name: http
       port: 3000
       targetPort: http
+      nodePort: 30000

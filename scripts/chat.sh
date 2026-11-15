@@ -16,6 +16,11 @@
 #                    /v1/chat/completions to send straight to a vLLM node)
 set -euo pipefail
 
+if ! command -v jq >/dev/null; then
+    echo "error: jq not found. Install it: https://jqlang.org/download/" >&2
+    exit 1
+fi
+
 usage() {
     # Print the comment block at the top of this file.
     awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2

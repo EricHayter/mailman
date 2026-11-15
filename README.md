@@ -11,8 +11,7 @@ Install [Docker](https://docs.docker.com/engine/install/),
 [kubectl](https://kubernetes.io/docs/tasks/tools/), `envsubst` and `jq`, then:
 
 ```
-scripts/kind-up.sh                                                 # cluster + vLLM + mailman
-kubectl --context kind-mailman port-forward svc/mailman 3000:3000  # leave running
+scripts/kind-up.sh    # cluster + vLLM + mailman, on localhost:3000
 cp .env.example .env
 scripts/chat.sh "hello"
 ```

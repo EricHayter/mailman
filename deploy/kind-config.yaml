@@ -8,6 +8,11 @@ nodes:
     extraMounts:
       - hostPath: ${HOME}/.cache/huggingface
         containerPath: /var/cache/huggingface
+    # localhost:3000 -> the mailman Service's nodePort (deploy/mailman.yaml).
+    extraPortMappings:
+      - containerPort: 30000
+        hostPort: 3000
+        listenAddress: 127.0.0.1
   - role: worker
     extraMounts:
       - hostPath: ${HOME}/.cache/huggingface
