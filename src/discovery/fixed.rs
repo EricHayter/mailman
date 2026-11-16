@@ -1,10 +1,10 @@
 use reqwest::Client;
-use std::net::SocketAddr;
-use tokio::{sync::mpsc, task::JoinSet};
+use std::{collections::HashMap, net::SocketAddr};
+use tokio::sync::mpsc;
 
 use super::{
     Discoverer, DiscoveryEvent,
-    healthcheck::{HealthCheckConfig, monitor_node},
+    healthcheck::{HealthCheckConfig, HealthChecker},
 };
 
 pub struct FixedDiscoverer {
@@ -29,19 +29,14 @@ impl FixedDiscoverer {
 
 impl Discoverer for FixedDiscoverer {
     async fn run(self, tx: mpsc::Sender<DiscoveryEvent>) -> anyhow::Result<()> {
-        // TODO: look at stopping monitors individually (e.g. a map of address to
-        // `AbortHandle`), which discoverers with changing nodes like Kubernetes
-        // will need. Also, this set is never joined, so a panicking monitor
-        // goes unnoticed and its node stays in its last state.
-        let mut monitors = JoinSet::new();
-        for &addr in &self.addrs {
-            monitors.spawn(monitor_node(
-                self.http_client.clone(),
-                addr,
-                self.health_check_cfg,
-                tx.clone(),
-            ));
-        }
+        let mut health_checker =
+            HealthChecker::new(self.http_client, self.health_check_cfg, tx.clone());
+        let desired = self
+            .addrs
+            .into_iter()
+            .map(|addr| (addr, 0))
+            .collect::<HashMap<_, _>>();
+        health_checker.set_nodes(&desired).await;
 
         tx.closed().await;
         Ok(())

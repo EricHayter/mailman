@@ -20,40 +20,75 @@ pub struct RoundRobinSelector {
     next: AtomicUsize,
 }
 
-impl NodeSelector for RoundRobinSelector {
-    /// Adds nodes the first time it hears about them. Logs only real changes,
-    /// since discoverers send an event after every health check.
-    fn handle_discovery_event(&self, event: DiscoveryEvent) {
-        let (addr, is_responsive) = match event {
-            DiscoveryEvent::Responsive(addr) => (addr, true),
-            DiscoveryEvent::Unresponsive(addr) => (addr, false),
-        };
+impl RoundRobinSelector {
+    // The handlers log only real changes, since discoverers send an event
+    // after every health check. They release the lock before logging, since
+    // writing logs is I/O and `select` shouldn't wait on it.
 
+    /// Adds the node if it's new, and marks it responsive.
+    fn handle_responsive(&self, addr: SocketAddr) {
         let mut nodes = self.nodes.write().unwrap();
-        let prev_state = nodes.insert(addr, is_responsive);
-        if prev_state == Some(is_responsive) {
+        let prev = nodes.insert(addr, true);
+        if prev == Some(true) {
             return;
         }
-        let num_nodes = nodes.len();
-        let responsive_count = nodes.values().filter(|&&responsive| responsive).count();
-        // Writing logs is I/O, so don't make `select` wait on it.
+        let (responsive, num_nodes) = node_counts(&nodes);
         drop(nodes);
 
-        // do some logging
-        match (prev_state, is_responsive) {
-            (None, true) => info!(%addr, responsive = responsive_count, num_nodes, "node added"),
-            (None, false) => {
-                info!(%addr, responsive = responsive_count, num_nodes, "node added, not responsive yet")
-            }
-            (Some(_), true) => {
-                info!(%addr, responsive = responsive_count, num_nodes, "node responsive again")
-            }
-            (Some(_), false) => {
-                warn!(%addr, responsive = responsive_count, num_nodes, "node marked unresponsive")
-            }
+        if prev.is_none() {
+            info!(%addr, responsive, num_nodes, "node added");
+        } else {
+            info!(%addr, responsive, num_nodes, "node responsive again");
         }
-        if responsive_count == 0 {
+    }
+
+    /// Marks the node unresponsive. Unknown nodes are ignored, so a late
+    /// failure report doesn't bring back a removed node.
+    fn handle_unresponsive(&self, addr: SocketAddr) {
+        let mut nodes = self.nodes.write().unwrap();
+        let Some(is_responsive) = nodes.get_mut(&addr) else {
+            return;
+        };
+        if !std::mem::replace(is_responsive, false) {
+            return; // still down, already logged
+        }
+        let (responsive, num_nodes) = node_counts(&nodes);
+        drop(nodes);
+
+        warn!(%addr, responsive, num_nodes, "node marked unresponsive");
+        if responsive == 0 {
             warn!(num_nodes, "no responsive nodes, requests will fail");
+        }
+    }
+
+    /// Drops the node. Unknown nodes are ignored.
+    fn handle_removed(&self, addr: SocketAddr) {
+        let mut nodes = self.nodes.write().unwrap();
+        if nodes.remove(&addr).is_none() {
+            return;
+        }
+        let (responsive, num_nodes) = node_counts(&nodes);
+        drop(nodes);
+
+        warn!(%addr, responsive, num_nodes, "node removed by discovery");
+        if responsive == 0 {
+            warn!(num_nodes, "no responsive nodes, requests will fail");
+        }
+    }
+}
+
+/// (responsive nodes, all nodes), for logging.
+fn node_counts(nodes: &HashMap<SocketAddr, bool>) -> (usize, usize) {
+    let responsive = nodes.values().filter(|&&is_responsive| is_responsive);
+    (responsive.count(), nodes.len())
+}
+
+impl NodeSelector for RoundRobinSelector {
+    fn handle_discovery_event(&self, event: DiscoveryEvent) {
+        match event {
+            DiscoveryEvent::Responsive(addr) => self.handle_responsive(addr),
+            DiscoveryEvent::Unresponsive(addr) => self.handle_unresponsive(addr),
+            DiscoveryEvent::Removed(addr) => self.handle_removed(addr),
         }
     }
 
@@ -136,9 +171,22 @@ mod tests {
     }
 
     #[test]
-    fn adds_unknown_nodes() {
+    fn adds_unknown_nodes_once_responsive() {
         let selector = selector_with(&[Unresponsive(addr(1)), Responsive(addr(2))]);
         assert_eq!(picks(&selector, 2), [Some(addr(2)), Some(addr(2))]);
+        assert!(!selector.nodes.read().unwrap().contains_key(&addr(1)));
+
+        selector.handle_discovery_event(Responsive(addr(1)));
+        assert_alternates(&picks(&selector, 4), addr(1), addr(2));
+    }
+
+    #[test]
+    fn removed_nodes_stay_removed_until_responsive() {
+        let selector = selector_with(&[Responsive(addr(1)), Responsive(addr(2))]);
+        selector.handle_discovery_event(Removed(addr(1)));
+        selector.handle_discovery_event(Unresponsive(addr(1)));
+        assert_eq!(picks(&selector, 2), [Some(addr(2)), Some(addr(2))]);
+        assert!(!selector.nodes.read().unwrap().contains_key(&addr(1)));
 
         selector.handle_discovery_event(Responsive(addr(1)));
         assert_alternates(&picks(&selector, 4), addr(1), addr(2));

@@ -3,7 +3,7 @@ mod prefix_cache;
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, RwLockWriteGuard},
 };
 
 use tracing::{info, warn};
@@ -105,27 +105,44 @@ impl CacheAwareSelector {
         health.consecutive_unresponsive += 1;
         let was_responsive = std::mem::replace(&mut health.is_responsive, false);
         let should_remove = health.consecutive_unresponsive >= self.config.max_unresponsive;
-        if !was_responsive && !should_remove {
-            return; // still down, already logged
-        }
         if should_remove {
             nodes.remove(&addr);
+            self.finish_removal(nodes, addr, "node removed after staying unresponsive");
+            return;
+        }
+        if !was_responsive {
+            return; // still down, already logged
         }
         let (responsive, num_nodes) = node_counts(&nodes);
         drop(nodes);
 
-        if should_remove {
-            let purged_prefixes = self.prefixes.lock().unwrap().remove_node(addr);
-            warn!(
-                %addr,
-                purged_prefixes,
-                responsive,
-                num_nodes,
-                "node removed after staying unresponsive"
-            );
-        } else {
-            warn!(%addr, responsive, num_nodes, "node marked unresponsive");
+        warn!(%addr, responsive, num_nodes, "node marked unresponsive");
+        if responsive == 0 {
+            warn!(num_nodes, "no responsive nodes, requests will fail");
         }
+    }
+
+    /// Drops the node and its prefixes. Unknown nodes are ignored.
+    fn remove_node(&self, addr: SocketAddr, message: &'static str) {
+        let mut nodes = self.nodes.write().unwrap();
+        if nodes.remove(&addr).is_some() {
+            self.finish_removal(nodes, addr, message);
+        }
+    }
+
+    /// Purges a node's prefixes and logs, given `nodes` with the node already
+    /// taken out. Releases `nodes` before purging (see `prefixes`).
+    fn finish_removal(
+        &self,
+        nodes: RwLockWriteGuard<'_, HashMap<SocketAddr, NodeHealth>>,
+        addr: SocketAddr,
+        message: &'static str,
+    ) {
+        let (responsive, num_nodes) = node_counts(&nodes);
+        drop(nodes);
+
+        let purged_prefixes = self.prefixes.lock().unwrap().remove_node(addr);
+        warn!(%addr, purged_prefixes, responsive, num_nodes, "{message}");
         if responsive == 0 {
             warn!(num_nodes, "no responsive nodes, requests will fail");
         }
@@ -143,6 +160,7 @@ impl NodeSelector for CacheAwareSelector {
         match event {
             DiscoveryEvent::Responsive(addr) => self.handle_responsive(addr),
             DiscoveryEvent::Unresponsive(addr) => self.handle_unresponsive(addr),
+            DiscoveryEvent::Removed(addr) => self.remove_node(addr, "node removed by discovery"),
         }
     }
 
@@ -298,5 +316,20 @@ mod tests {
             selector.handle_discovery_event(Unresponsive(addr(1)));
         }
         assert!(is_known(&selector, addr(1)));
+    }
+
+    #[test]
+    fn removed_drops_node_and_prefixes() {
+        let selector = two_nodes();
+        let node = pick(&selector, &[SYSTEM, "hello"]).unwrap();
+        assert_eq!(cached_prefixes(&selector), 1);
+
+        selector.handle_discovery_event(Removed(node));
+        assert!(!is_known(&selector, node));
+        assert_eq!(cached_prefixes(&selector), 0);
+
+        // A request handler's late failure report doesn't bring it back.
+        selector.handle_discovery_event(Unresponsive(node));
+        assert!(!is_known(&selector, node));
     }
 }
