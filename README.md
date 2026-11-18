@@ -32,6 +32,24 @@ mailman is configured through environment variables, set in
 | `RUST_LOG` | log filter, e.g. `info` or `mailman=debug` |
 | `LOG_FORMAT` | `json` for JSON logs |
 
+## Stats
+
+`GET /stats` returns JSON for each node and for the whole cluster:
+
+- Requests mailman sent to each node, and how many of them failed.
+- What vLLM reports on `/metrics`, scraped every 5s:
+  - running and waiting requests, and KV cache usage
+  - prefix cache hit rate
+  - token and request throughput
+  - preemptions
+  - mean TTFT, end-to-end and inter-token latency
+
+Each vLLM figure comes both since vLLM started (`lifetime`) and over the last minute (`recent`).
+
+```
+curl -s localhost:3000/stats | jq .cluster
+```
+
 ## Troubleshooting
 
 **`permission denied while trying to connect to the Docker daemon socket`**

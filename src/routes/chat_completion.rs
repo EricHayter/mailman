@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
 use axum::{
     Router,
@@ -16,8 +16,7 @@ use tracing::{Instrument, debug, error, info_span, warn};
 
 use super::AppState;
 use crate::{
-    discovery::DiscoveryEvent, models::CreateChatCompletionRequest, selector::NodeSelector,
-    telemetry::error_chain,
+    discovery::DiscoveryEvent, models::CreateChatCompletionRequest, telemetry::error_chain,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -64,15 +63,16 @@ async fn create_chat_completion(
 
     while let Some(addr) = state.selector.select(&req, &tried) {
         tried.push(addr);
+        state.stats.record_request_sent(addr);
 
         let attempt = info_span!("attempt", %addr, number = tried.len());
         match send_to_node(&state.client, addr, body.clone(), authorization)
             .instrument(attempt)
             .await
         {
-            Attempt::Done(response) => return Ok(proxy_response(response, addr, &state.selector)),
+            Attempt::Done(response) => return Ok(proxy_response(response, addr, &state)),
             Attempt::NodeFailed(response) => {
-                mark_unresponsive(&state.selector, addr);
+                handle_node_failure(&state, addr);
                 if let Some(response) = response {
                     fallback = Some((addr, response));
                 }
@@ -84,7 +84,7 @@ async fn create_chat_completion(
     match fallback {
         Some((addr, response)) => {
             error!(?tried, "every node failed, returning the last server error");
-            Ok(proxy_response(response, addr, &state.selector))
+            Ok(proxy_response(response, addr, &state))
         }
         None if tried.is_empty() => {
             // The selector warns once when the last node goes down.
@@ -146,28 +146,28 @@ async fn send_to_node(
 /// Passes chunks through as they arrive so `stream: true` responses aren't
 /// held back until generation finishes. A failure partway through marks the
 /// node unresponsive, but can't be retried because the response has started.
-fn proxy_response(
-    response: reqwest::Response,
-    addr: SocketAddr,
-    selector: &Arc<dyn NodeSelector>,
-) -> Response {
+fn proxy_response(response: reqwest::Response, addr: SocketAddr, state: &AppState) -> Response {
     let status = response.status();
     let mut headers = HeaderMap::new();
     if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
         headers.insert(CONTENT_TYPE, content_type.clone());
     }
 
-    let selector = selector.clone();
+    let state = state.clone();
     let body = response.bytes_stream().inspect_err(move |err| {
         warn!(%addr, error = %error_chain(err), "response stream from node failed partway");
-        mark_unresponsive(&selector, addr);
+        handle_node_failure(&state, addr);
     });
 
     (status, headers, Body::from_stream(body)).into_response()
 }
 
-fn mark_unresponsive(selector: &Arc<dyn NodeSelector>, addr: SocketAddr) {
-    selector.handle_discovery_event(DiscoveryEvent::Unresponsive(addr));
+/// Marks the node unresponsive and counts the failure in its stats.
+fn handle_node_failure(state: &AppState, addr: SocketAddr) {
+    state
+        .selector
+        .handle_discovery_event(DiscoveryEvent::Unresponsive(addr));
+    state.stats.record_request_failed(addr);
 }
 
 async fn delete_chat_completion() -> String {

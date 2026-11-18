@@ -11,16 +11,18 @@ use tracing::info;
 use discovery::{
     Discoverer, FixedDiscoverer, HealthCheckConfig, KubernetesConfig, KubernetesDiscoverer,
 };
-use routes::{AppState, chat_completion};
+use routes::{AppState, chat_completion, stats as stats_routes};
 use selector::{
     NodeSelector,
     cache_aware::{CacheAwareConfig, CacheAwareSelector},
 };
+use stats::{StatsCollector, StatsConfig};
 
 mod discovery;
 mod models;
 mod routes;
 mod selector;
+mod stats;
 mod telemetry;
 
 const ADDRESS: &str = "0.0.0.0:3000";
@@ -41,11 +43,17 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let selector: Arc<dyn NodeSelector> =
         Arc::new(CacheAwareSelector::new(CacheAwareConfig::default()));
+    let stats = Arc::new(StatsCollector::new(client.clone(), StatsConfig::default()));
+    tokio::spawn({
+        let stats = stats.clone();
+        async move { stats.run_scraper().await }
+    });
 
     let discovery = match kubernetes_config()? {
         Some(config) => spawn_discovery(
             KubernetesDiscoverer::new(config, client.clone(), HealthCheckConfig::default()),
             selector.clone(),
+            stats.clone(),
         ),
         None => {
             info!(backends = ?BACKENDS, "using fixed backends");
@@ -56,12 +64,21 @@ async fn main() -> anyhow::Result<()> {
                     HealthCheckConfig::default(),
                 ),
                 selector.clone(),
+                stats.clone(),
             )
         }
     };
 
-    let app = telemetry::http_layers(Router::new().merge(chat_completion::routes()))
-        .with_state(AppState { client, selector });
+    let app = telemetry::http_layers(
+        Router::new()
+            .merge(chat_completion::routes())
+            .merge(stats_routes::routes()),
+    )
+    .with_state(AppState {
+        client,
+        selector,
+        stats,
+    });
     let listener = tokio::net::TcpListener::bind(ADDRESS).await?;
     info!(address = ADDRESS, "listening");
 
@@ -98,17 +115,19 @@ fn kubernetes_config() -> anyhow::Result<Option<KubernetesConfig>> {
     }))
 }
 
-/// Feeds discovery events to the selector in the background. The returned
-/// handle resolves if discovery stops.
+/// Feeds discovery events to the selector and stats in the background. The
+/// returned handle resolves if discovery stops.
 fn spawn_discovery(
     discoverer: impl Discoverer,
     selector: Arc<dyn NodeSelector>,
+    stats: Arc<StatsCollector>,
 ) -> JoinHandle<anyhow::Result<()>> {
     let (tx, mut rx) = mpsc::channel(32);
 
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             selector.handle_discovery_event(event);
+            stats.handle_discovery_event(event);
         }
     });
 
