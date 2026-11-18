@@ -15,6 +15,7 @@ use routes::{AppState, chat_completion, stats as stats_routes};
 use selector::{
     NodeSelector,
     cache_aware::{CacheAwareConfig, CacheAwareSelector},
+    round_robin::RoundRobinSelector,
 };
 use stats::{StatsCollector, StatsConfig};
 
@@ -26,7 +27,8 @@ mod stats;
 mod telemetry;
 
 const ADDRESS: &str = "0.0.0.0:3000";
-const BACKENDS: [SocketAddr; 1] = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)];
+/// Used when neither `MAILMAN_K8S_SERVICE` nor `MAILMAN_BACKENDS` is set.
+const DEFAULT_BACKEND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum gap between reads, not a limit on the whole request. A non-streaming
 /// completion sends nothing until it finishes, so this has to outlast the
@@ -41,8 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()?;
-    let selector: Arc<dyn NodeSelector> =
-        Arc::new(CacheAwareSelector::new(CacheAwareConfig::default()));
+    let selector = selector_from_env()?;
     let stats = Arc::new(StatsCollector::new(client.clone(), StatsConfig::default()));
     tokio::spawn({
         let stats = stats.clone();
@@ -56,13 +57,10 @@ async fn main() -> anyhow::Result<()> {
             stats.clone(),
         ),
         None => {
-            info!(backends = ?BACKENDS, "using fixed backends");
+            let backends = fixed_backends().await?;
+            info!(?backends, "using fixed backends");
             spawn_discovery(
-                FixedDiscoverer::new(
-                    BACKENDS.to_vec(),
-                    client.clone(),
-                    HealthCheckConfig::default(),
-                ),
+                FixedDiscoverer::new(backends, client.clone(), HealthCheckConfig::default()),
                 selector.clone(),
                 stats.clone(),
             )
@@ -93,8 +91,60 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `MAILMAN_SELECTOR` picks how requests are spread over nodes:
+/// `cache_aware` (the default) or `round_robin`.
+fn selector_from_env() -> anyhow::Result<Arc<dyn NodeSelector>> {
+    let name = std::env::var("MAILMAN_SELECTOR").unwrap_or_default();
+    let selector: Arc<dyn NodeSelector> = match name.as_str() {
+        "" | "cache_aware" => Arc::new(CacheAwareSelector::new(CacheAwareConfig::default())),
+        "round_robin" => Arc::new(RoundRobinSelector::default()),
+        other => {
+            anyhow::bail!("unknown MAILMAN_SELECTOR {other:?}, expected cache_aware or round_robin")
+        }
+    };
+    info!(
+        selector = if name.is_empty() {
+            "cache_aware"
+        } else {
+            &name
+        },
+        "routing"
+    );
+    Ok(selector)
+}
+
+/// `MAILMAN_BACKENDS`, a comma-separated list of `host:port`, each host
+/// resolved once at startup (e.g. Docker Compose service names), or
+/// `DEFAULT_BACKEND` if it isn't set.
+async fn fixed_backends() -> anyhow::Result<Vec<SocketAddr>> {
+    let list = std::env::var("MAILMAN_BACKENDS").unwrap_or_default();
+    if list.trim().is_empty() {
+        return Ok(vec![DEFAULT_BACKEND]);
+    }
+    let mut backends = Vec::new();
+    for entry in list
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let addr = tokio::net::lookup_host(entry)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("couldn't resolve MAILMAN_BACKENDS entry {entry:?}: {err}")
+            })?
+            // vLLM listens on IPv4 by default, so prefer it for names like
+            // `localhost` that resolve to both.
+            .min_by_key(SocketAddr::is_ipv6)
+            .ok_or_else(|| {
+                anyhow::anyhow!("MAILMAN_BACKENDS entry {entry:?} resolved to nothing")
+            })?;
+        backends.push(addr);
+    }
+    Ok(backends)
+}
+
 /// Kubernetes discovery is used when `MAILMAN_K8S_SERVICE` is set, otherwise
-/// the fixed `BACKENDS`.
+/// fixed backends.
 fn kubernetes_config() -> anyhow::Result<Option<KubernetesConfig>> {
     let var = |name| {
         std::env::var(name)

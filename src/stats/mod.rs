@@ -421,6 +421,8 @@ impl VllmReport {
                 prompt_tokens: counters.prompt_tokens,
                 generation_tokens: counters.generation_tokens,
                 preemptions: counters.preemptions,
+                prefix_cache_queried_tokens: counters.prefix_cache_queries,
+                prefix_cache_hit_tokens: counters.prefix_cache_hits,
                 prefix_cache_hit_rate: counters.prefix_cache_hit_rate(),
                 mean_ttft_secs: counters.mean_ttft_secs(),
                 mean_e2e_latency_secs: counters.mean_e2e_latency_secs(),
@@ -449,6 +451,8 @@ pub struct LifetimeReport {
     pub prompt_tokens: f64,
     pub generation_tokens: f64,
     pub preemptions: f64,
+    pub prefix_cache_queried_tokens: f64,
+    pub prefix_cache_hit_tokens: f64,
     /// Fraction of prompt tokens served from the prefix cache.
     pub prefix_cache_hit_rate: Option<f64>,
     pub mean_ttft_secs: Option<f64>,

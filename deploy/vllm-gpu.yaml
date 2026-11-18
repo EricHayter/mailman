@@ -1,0 +1,86 @@
+# Qwen3-8B on a multi-GPU machine, one GPU per pod (deploy/nvidia-device-plugin.yaml).
+# Set replicas to the machine's GPU count. Don't run alongside vllm-cpu.yaml:
+# both share the app=vllm Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  replicas: 8
+  # With every GPU in use there's nowhere to surge a replacement onto.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      runtimeClassName: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.33.0
+          args:
+            - --model
+            - Qwen/Qwen3-8B
+            - --max-model-len
+            - "8192"
+            # Share of GPU memory for weights + KV cache.
+            - --gpu-memory-utilization
+            - "0.90"
+          env:
+            # Enables POST /reset_prefix_cache, so benchmark runs start cold.
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+          # Up to 20 min to boot: weight download and CUDA graph capture.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 240
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # GPU only: CPU and memory are plentiful on a GPU machine.
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]         # py-spy / gdb
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory     # tmpfs in RAM
+            sizeLimit: 8Gi
+        # Shared by every pod on the machine: the first to start downloads
+        # the model while the rest wait on its lock, then reuse it.
+        - name: hf-cache
+          hostPath:
+            path: /var/cache/huggingface
+            type: DirectoryOrCreate

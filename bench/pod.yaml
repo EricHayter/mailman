@@ -1,0 +1,47 @@
+# Runs one benchmark (bench/run-aiperf.sh) in the cluster, next to mailman, so
+# results don't include internet latency. bench/run-k8s.sh fills in the variables.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench
+  labels:
+    app: bench
+spec:
+  restartPolicy: Never
+  containers:
+    - name: bench
+      # Built from bench/Dockerfile and loaded into the cluster.
+      image: mailman-bench:dev
+      imagePullPolicy: Never
+      # Stays up after the run so bench/run-k8s.sh can copy the results out.
+      command: ["bash", "-c", "bash /bench/run-aiperf.sh && sleep infinity"]
+      env:
+        - { name: ROUTER, value: "${ROUTER}" }
+        - { name: MAILMAN_URL, value: "http://mailman:3000" }
+        - { name: MODEL, value: "${MODEL}" }
+        - { name: VLLM_NODES, value: "${VLLM_NODES}" }
+        - { name: VLLM_METRICS_URLS, value: "${VLLM_METRICS_URLS}" }
+        - { name: PREFIXES, value: "${PREFIXES}" }
+        - { name: PREFIX_TOKENS, value: "${PREFIX_TOKENS}" }
+        - { name: USER_TOKENS, value: "${USER_TOKENS}" }
+        - { name: OUTPUT_TOKENS, value: "${OUTPUT_TOKENS}" }
+        - { name: CONCURRENCY, value: "${CONCURRENCY}" }
+        - { name: REQUESTS, value: "${REQUESTS}" }
+      resources:
+        requests:
+          cpu: "2"
+          memory: 4Gi
+      volumeMounts:
+        - name: scripts
+          mountPath: /bench
+        # The tokenizer, already downloaded there by the vLLM pods.
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+  volumes:
+    - name: scripts
+      configMap:
+        name: bench-scripts
+    - name: hf-cache
+      hostPath:
+        path: /var/cache/huggingface
+        type: DirectoryOrCreate
