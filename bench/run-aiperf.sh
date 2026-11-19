@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One AIPerf run against mailman, recording mailman's /stats alongside. Runs
+# One AIPerf run against the router at ROUTER_URL, recording mailman's /stats
+# alongside. Runs
 # in the bench pod (bench/pod.yaml), configured by environment variables.
 # Leaves results in /results and touches /results/DONE, which bench/run-k8s.sh
 # waits for.
@@ -20,9 +21,9 @@ poller=$!
 aiperf profile \
     --model "$MODEL" \
     --tokenizer "$MODEL" \
-    --url "$MAILMAN_URL" \
+    --url "$ROUTER_URL" \
     --endpoint-type chat \
-    --endpoint /chat/completions \
+    --endpoint "$ENDPOINT" \
     --streaming \
     --num-prefix-prompts "$PREFIXES" \
     --prefix-prompt-length "$PREFIX_TOKENS" \

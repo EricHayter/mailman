@@ -39,6 +39,10 @@ spec:
             # Share of GPU memory for weights + KV cache.
             - --gpu-memory-utilization
             - "0.90"
+            # Serves /v1/chat/completions/render, which vLLM's router
+            # (bench/vllm-router.yaml) calls to tokenize requests for its
+            # cache-aware policy. Without it, that policy routes by load alone.
+            - --enable-scale-out
           env:
             # Enables POST /reset_prefix_cache, so benchmark runs start cold.
             - name: VLLM_SERVER_DEV_MODE

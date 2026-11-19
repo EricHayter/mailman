@@ -1,5 +1,5 @@
-# Runs one benchmark (bench/run-aiperf.sh) in the cluster, next to mailman, so
-# results don't include internet latency. bench/run-k8s.sh fills in the variables.
+# Runs one benchmark (bench/run-aiperf.sh) in the cluster, next to the routers,
+# so results don't include internet latency. bench/run-k8s.sh fills in the variables.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -17,6 +17,8 @@ spec:
       command: ["bash", "-c", "bash /bench/run-aiperf.sh && sleep infinity"]
       env:
         - { name: ROUTER, value: "${ROUTER}" }
+        - { name: ROUTER_URL, value: "${ROUTER_URL}" }
+        - { name: ENDPOINT, value: "${ENDPOINT}" }
         - { name: MAILMAN_URL, value: "http://mailman:3000" }
         - { name: MODEL, value: "${MODEL}" }
         - { name: VLLM_NODES, value: "${VLLM_NODES}" }

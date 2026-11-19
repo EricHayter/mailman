@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sets up a single-machine k3s cluster on a multi-GPU Linux machine (e.g. a
-# Lambda Cloud 8x H100 instance) and deploys one vLLM pod per GPU behind
+# Lambda Cloud 8x A100 instance) and deploys one vLLM pod per GPU behind
 # mailman, for benchmarking with bench/run-k8s.sh. Run it on that machine.
 #
 # Needs NVIDIA drivers, the NVIDIA Container Toolkit (k3s picks up its runtime

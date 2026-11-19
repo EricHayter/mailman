@@ -21,14 +21,24 @@ import pandas as pd
 import seaborn as sns
 
 # Fixed per router, so a router keeps its color whichever runs are present.
-ROUTER_COLORS = {"round_robin": "#2a78d6", "cache_aware": "#eb6834"}
-ROUTER_LABELS = {"round_robin": "Round robin", "cache_aware": "Cache-aware"}
+ROUTER_COLORS = {"round_robin": "#2a78d6", "cache_aware": "#eb6834", "vllm_router": "#1baf7a"}
+ROUTER_LABELS = {
+    "round_robin": "Round robin",
+    "cache_aware": "mailman",
+    "vllm_router": "vLLM router",
+}
 TEXT = "#0b0b0b"
 MUTED = "#52514e"
 GRID = "#e4e3df"
 
 
 def load_requests(run_dir: Path) -> pd.DataFrame:
+    """One row per successful request. `first_of_prefix` marks the first
+    request to use each shared prefix, which misses the cache whatever the
+    router does."""
+    sessions = json.loads((run_dir / "aiperf" / "inputs.json").read_text())["data"]
+    # Compare a slice of the text: the prefix comes first, and is far longer.
+    prefix = {s["session_id"]: s["payloads"][0]["messages"][0]["content"][:500] for s in sessions}
     rows = []
     with open(run_dir / "aiperf" / "profile_export.jsonl") as f:
         for line in f:
@@ -38,12 +48,15 @@ def load_requests(run_dir: Path) -> pd.DataFrame:
                 continue  # failed request
             rows.append(
                 {
+                    "start_ns": record["metadata"]["request_start_ns"],
                     "end_ns": record["metadata"]["request_end_ns"],
+                    "prefix": prefix[record["metadata"]["conversation_id"]],
                     "ttft_ms": metrics["time_to_first_token"]["value"],
                     "latency_ms": metrics["request_latency"]["value"],
                 }
             )
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows).sort_values("start_ns")
+    df["first_of_prefix"] = ~df["prefix"].duplicated()
     df["elapsed_s"] = (df["end_ns"] - df["end_ns"].min()) / 1e9
     return df
 
@@ -59,9 +72,10 @@ def node_names(snapshots: list[dict]) -> dict[str, str]:
 
 
 def per_node_totals(snapshots: list[dict], names: dict[str, str]) -> pd.DataFrame:
-    """Requests mailman sent each node, and each node's prefix cache hit rate,
-    from the change between the first and last snapshots. vLLM's counters
-    span every run, so only the change belongs to this one."""
+    """Requests each node served, and its prefix cache hit rate, from the
+    change between the first and last snapshots. vLLM's counters span every
+    run, so only the change belongs to this one. Counted by vLLM rather than
+    mailman, since mailman isn't the router in vllm_router's runs."""
     first = {n["addr"]: n for n in snapshots[0]["stats"]["nodes"]}
     rows = []
     for node in snapshots[-1]["stats"]["nodes"]:
@@ -73,7 +87,7 @@ def per_node_totals(snapshots: list[dict], names: dict[str, str]) -> pd.DataFram
         rows.append(
             {
                 "node": names[node["addr"]],
-                "requests_sent": node["requests_sent"],
+                "requests": _counter_delta(node, start, "requests_succeeded"),
                 "prefix_hit_tokens": hit,
                 "prefix_query_tokens": queried,
             }
@@ -81,7 +95,7 @@ def per_node_totals(snapshots: list[dict], names: dict[str, str]) -> pd.DataFram
     if not rows:
         print("warning: no node has vLLM stats in both the first and last snapshot;"
               " this run has no cache numbers", file=sys.stderr)
-    columns = ["node", "requests_sent", "prefix_hit_tokens", "prefix_query_tokens"]
+    columns = ["node", "requests", "prefix_hit_tokens", "prefix_query_tokens"]
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -131,16 +145,18 @@ def FULL_RANGE(values):
 
 def write_summary(summary: pd.DataFrame, metrics: list[str], out: Path):
     """Each router's mean, and its spread between runs as a % of the mean;
-    then cache-aware's change from round robin. A change much bigger than
+    then each cache-aware router's change from round robin, and mailman's
+    from vLLM's router. A change much bigger than
     the spread is real; one about the same size is noise."""
     grouped = summary.groupby("router")[metrics]
     mean = grouped.mean()
     spread = (grouped.max() - grouped.min()) / mean * 100
     table = pd.concat({"mean": mean, "spread %": spread}).round(3)
-    rr, ca = ROUTER_LABELS["round_robin"], ROUTER_LABELS["cache_aware"]
-    if rr in mean.index and ca in mean.index:
-        change = ((mean.loc[ca] - mean.loc[rr]) / mean.loc[rr] * 100).round(1)
-        table.loc[("change %", f"{ca} vs {rr}"), :] = change
+    rr, ca, vr = (ROUTER_LABELS[r] for r in ("round_robin", "cache_aware", "vllm_router"))
+    for router, baseline in [(ca, rr), (vr, rr), (ca, vr)]:
+        if router in mean.index and baseline in mean.index:
+            change = (mean.loc[router] - mean.loc[baseline]) / mean.loc[baseline] * 100
+            table.loc[("change %", f"{router} vs {baseline}"), :] = change.round(1)
     table.to_csv(out / "summary.csv")
     print(table.to_string())
 
@@ -183,6 +199,9 @@ def main():
                 "Throughput (req/s)": aiperf["request_throughput"]["avg"],
                 "TTFT p50 (ms)": aiperf["time_to_first_token"]["p50"],
                 "TTFT p99 (ms)": aiperf["time_to_first_token"]["p99"],
+                # Without the cold misses no router can avoid.
+                "TTFT p99, repeat prefixes (ms)": reqs.loc[~reqs["first_of_prefix"], "ttft_ms"]
+                .quantile(0.99),
                 "Latency p50 (ms)": aiperf["request_latency"]["p50"],
                 "Prefix cache hit rate": totals["prefix_hit_tokens"].sum() / queried
                 if queried
@@ -196,26 +215,44 @@ def main():
     metrics = [c for c in summary.columns if c not in ("router", "run")]
     write_summary(summary, metrics, out)
 
-    # Headline numbers, one panel each since their units differ.
+    # Headline numbers, one chart each.
     order = [ROUTER_LABELS[r] for r in routers]
-    fig, axes = plt.subplots(1, len(metrics), figsize=(3.2 * len(metrics), 3.4))
-    for ax, column in zip(axes, metrics):
-        sns.barplot(summary, x="router", y=column, hue="router", order=order, palette=palette,
-                    saturation=1, width=0.6, errorbar=FULL_RANGE, capsize=0.15,
+    headline = summary.melt(id_vars=["router", "run"], var_name="metric")
+    for columns, title, ylabel, fmt, name in [
+        (["Throughput (req/s)"], "Throughput", "Requests per second", "{:,.1f}",
+         "throughput.png"),
+        (["TTFT p50 (ms)", "TTFT p99 (ms)"], "Time to first token", "Milliseconds",
+         "{:,.0f}", "ttft.png"),
+        (["Latency p50 (ms)"], "End-to-end latency (p50)", "Milliseconds", "{:,.0f}",
+         "latency.png"),
+        (["Prefix cache hit rate"], "Prefix cache hit rate", "Hit rate", "{:.0%}",
+         "hit_rate.png"),
+    ]:
+        data = headline[headline["metric"].isin(columns)].copy()
+        data["metric"] = data["metric"].str.extract(r"(p\d+)", expand=False).fillna("")
+        fig, ax = plt.subplots(figsize=(4.8, 3.6))
+        grouped = len(columns) > 1
+        x, hue = ("metric", "router") if grouped else ("router", "router")
+        sns.barplot(data, x=x, y="value", hue=hue, hue_order=order,
+                    order=None if grouped else order, palette=palette, saturation=1,
+                    width=0.7 if grouped else 0.6, errorbar=FULL_RANGE, capsize=0.15,
                     err_kws={"color": MUTED, "linewidth": 1.5}, ax=ax)
-        sns.stripplot(summary, x="router", y=column, order=order, color=TEXT, size=4,
-                      jitter=0.08, ax=ax)
-        for i, value in enumerate(summary.groupby("router")[column].mean().reindex(order)):
-            text = f"{value:.0%}" if "rate" in column else f"{value:,.1f}"
-            ax.annotate(text, (i, 0), ha="center", va="bottom", xytext=(0, 4),
-                        textcoords="offset points", color="white", fontsize=9,
-                        fontweight="bold")
-        ax.set_title(column, fontsize=10)
+        for container in ax.containers:
+            if hasattr(container, "patches"):
+                ax.bar_label(container, labels=[fmt.format(b.get_height())
+                                                for b in container.patches],
+                             label_type="center", color="white", fontsize=9,
+                             fontweight="bold")
+        if fmt.endswith("%}"):
+            ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+        ax.set_title(title)
         ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.tick_params(axis="x", labelsize=8)
-    fig.suptitle("Router comparison", fontweight="bold")
-    save(fig, out, "summary.png")
+        ax.set_ylabel(ylabel)
+        if grouped:
+            ax.get_legend().set_title(None)
+        elif ax.get_legend():
+            ax.get_legend().remove()
+        save(fig, out, name)
 
     # TTFT distribution: where the cache hits show up.
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -229,9 +266,9 @@ def main():
 
     # Load and cache hits per node.
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
-    sns.barplot(nodes, x="node", y="requests_sent", hue="router", palette=palette, saturation=1,
+    sns.barplot(nodes, x="node", y="requests", hue="router", palette=palette, saturation=1,
                 errorbar=FULL_RANGE, ax=axes[0])
-    axes[0].set_title("Requests sent to each node")
+    axes[0].set_title("Requests served by each node")
     axes[0].set_ylabel("Requests")
     nodes["hit_rate"] = nodes["prefix_hit_tokens"] / nodes["prefix_query_tokens"]
     sns.barplot(nodes, x="node", y="hit_rate", hue="router", palette=palette, saturation=1,
